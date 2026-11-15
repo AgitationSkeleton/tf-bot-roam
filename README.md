@@ -1,8 +1,8 @@
 # TF2 Bot Roam
 
-A SourceMod plugin for Team Fortress 2 that gets stock TFBots moving on maps
-without an objective: trade maps, hangout/idle maps, and many custom maps. It
-needs no gamedata or extensions.
+A SourceMod plugin for Team Fortress 2 that gets stock TFBots of every class
+moving on maps without an objective: trade maps, hangout/idle maps and many
+custom maps. It needs no gamedata or extensions.
 
 ## The problem
 
@@ -11,50 +11,53 @@ patients and Engineers try to build. Every other class stands near where it
 spawned until an enemy wanders into view. That includes Scout, Soldier, Pyro,
 Demoman and Heavy, plus class-10 bots from custom-class plugins.
 
-The cause is in TFBot's behaviour tree:
+The cause is in TFBot's behaviour tree (public Source SDK 2013 TF code):
 
 * Spy and Sniper have their own roaming behaviours (`CTFBotSpyInfiltrate`,
   `CTFBotSniperLurk`).
 * Every other class falls back to `CTFBotSeekAndDestroy` when the map has no
   flag, cart or control point ("scenario not implemented yet - just fight").
-* `CTFBotSeekAndDestroy::ChooseGoalArea` only travels to two kinds of place:
-  the enemy team's spawn-room exits and the current control point.
-* The nav mesh marks spawn-room exits only inside `func_respawnroom` volumes
-  that contain `info_player_teamspawn` points (`CTFNavMesh::DecorateMesh`).
-  Maps without them make the server print *"Can't compute incursion distances
-  ... Bots will perform poorly"*, and the bots have nowhere to go.
+* `CTFBotSeekAndDestroy::ChooseGoalArea` has only two kinds of destination:
+  * **"Enemy spawn exit" areas.** These come from
+    `CTFNavMesh::CollectSpawnRoomThresholdAreas`, which reads
+    `TheNavAreas[i]` where it should read the exit list. The goals are
+    therefore whichever areas the `.nav` file happens to store first, in
+    practice useless spots. That is why bots idle even on maps with proper
+    spawn rooms.
+  * **The bot's current control point.** Maps without an objective have none.
 
 ## What the plugin does
 
 On maps that need it, the plugin:
 
-1. Groups each team's spawn points into clusters, then adds one small invisible
-   `func_respawnroom` around each cluster.
-2. Gives teamless spawn points a RED copy at the same spot. The nav mesh files
-   team-0 spawns under BLU only, so without the copy RED bots would get no
-   destinations.
-3. Asks the nav mesh to recompute through a `tf_point_nav_interface`
-   `RecomputeBlockers` input. It repeats all of this after every round restart,
-   because a restart removes entities the map did not create.
+1. Adds hidden, silent, neutral control points under a disabled
+   `team_control_point_master`. The default is two points.
+2. Places each point on a playable spot. Spots are taken from map entities
+   (lights, props, items, sounds, triggers) dropped to the floor, and from
+   where players walk. Each spot must fit a standing player outside the
+   spawn rooms.
+3. Moves a point to a new spot a few seconds after someone reaches it, plus
+   every `tf_bot_roam_interval` seconds as a fallback.
+4. Asks the nav mesh to recompute after each move, through a
+   `tf_point_nav_interface` `RecomputeBlockers` input.
 
-The bots then use their own pathfinding to head for enemy spawn areas, and they
-fight whatever they meet on the way.
+Bots of every class head for their current point, meet and fight on the way,
+then move on when the point does.
 
-The added volumes belong to the spectator team. Players never count as inside
-them, so nobody gets spawn-room privileges such as instant class change or flag
-drops. The nav mesh labels areas by the spawn point's team, not the volume's,
-so the bots still get their destinations. The one side effect is that
-Engineers cannot build inside these small volumes.
+## Safety
 
-## When it applies
-
-In `auto` mode (the default) it does nothing on a map that has any of these:
-
-* an objective: `team_control_point`, `item_teamflag`, `team_train_watcher`,
-  `func_capturezone`, `passtime_logic`, a robot or player destruction logic
-  entity, `tf_logic_koth`, or `tf_logic_hybrid_ctf_cp`;
-* real Mann vs. Machine (`tf_logic_mann_vs_machine`);
-* the map's own spawn rooms for both teams.
+* **No round wins.** The master starts disabled, so its win check never runs.
+* **No real captures.** A capture takes about 28 hours (`area_time_to_cap`),
+  so it never completes.
+* **Hidden and silent.** The points have no HUD icon, model, shadow, capture
+  sounds or capture warnings.
+* **Linear capping.** Each point lists itself as its own previous point, so
+  `tf_caplinear` never blocks it.
+* **Game mode unchanged.** The game decides the mode once at map start, before
+  the points exist, so the map stays in its normal mode.
+* **Objective maps untouched.** In `auto` mode the plugin leaves alone any map
+  with an objective: a control point, flag, payload, capture zone, arena,
+  KotH, Mann vs. Machine, PASS Time, Robot Destruction or Player Destruction.
 
 ## ConVars
 
@@ -62,13 +65,15 @@ In `auto` mode (the default) it does nothing on a map that has any of these:
 
 | ConVar | Default | Meaning |
 |---|---|---|
-| `tf_bot_roam_mode` | `auto` | `auto` = only maps that need it, `force` = every map, `off` |
-| `tf_bot_roam_merge_distance` | `384` | Spawn points closer than this share one volume, so there are fewer entities. |
-| `tf_bot_roam_padding` | `48` | Units added around each spawn cluster. Keep it small: Engineers cannot build inside. |
-| `tf_bot_roam_debug` | `0` | `1` = log what the plugin did on each map and round. |
+| `tf_bot_roam_mode` | `auto` | `auto` = only maps without an objective, `force` = every map without a control-point master, `off` |
+| `tf_bot_roam_points` | `2` | Hidden roam points at a time (1-4). |
+| `tf_bot_roam_interval` | `40` | Seconds between moving one of the points (fallback). |
+| `tf_bot_roam_arrive_delay` | `6` | Seconds a point stays after someone reaches it. |
+| `tf_bot_roam_min_distance` | `768` | Distance a moved point goes from its last spot (when possible). |
+| `tf_bot_roam_debug` | `0` | `1` = log what the plugin does. |
 
-Command: `sm_botroam` shows what the plugin did on the current map, and
-`sm_botroam apply` re-applies it (generic admin flag).
+Command `sm_botroam` (generic admin flag) shows the state and point
+positions. `sm_botroam apply` re-applies, `sm_botroam move` moves a point now.
 
 ## Install
 
@@ -78,14 +83,12 @@ Requires SourceMod 1.11 or newer; built with 1.12.
 
 ## Limitations
 
-* Bots travel toward enemy spawn areas, which isn't the same as wandering
-  freely. On a map where everyone spawns in one hub, bots converge on the hub
-  and fight there.
-* Medics and Engineers keep their stock behaviours.
 * The map needs a nav mesh (`.nav`). Generate one with `nav_generate` if it
   has none.
+* Medics keep healing and Engineers keep building, as in stock TF2.
+* Players standing on a hidden point start an endless, invisible capture.
+  Nothing happens, but the game does fire a "capture started" event.
 
 ## License
 
-GPL-3.0 (see `LICENSE`), like SourceMod itself. The behaviour analysis
-references the public Source SDK 2013 TF code.
+GPL-3.0 (see `LICENSE`), like SourceMod itself.
